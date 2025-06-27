@@ -1,14 +1,14 @@
 import axios from 'axios'
 
-const API_BASE_URL = 'http://localhost:3000'
+const API_BASE_URL = 'http://localhost:8000'
 
 interface CreateUserResponse {
-  userid: string;
+  user_id: string;
 }
 
 interface CreateSessionResponse {
-  userid: string;
-  sessionid: string;
+  user_id: string;
+  session_id: string;
 }
 
 interface SendMessageResponse {
@@ -33,7 +33,7 @@ interface LoadSessionResponse {
 }
 
 interface HistorySession {
-  sessionid: string;
+  session_id: string;
   abstract: string;
   update_time: string;
 }
@@ -59,27 +59,26 @@ interface SaveUserMsgResponse {
  *   - 捕获并记录获取失败错误
  */
 export const getUserId = async (): Promise<string> => {
+  console.log('**getUserId')
   const STORAGE_KEY = 'ztf_user_id'
+  console.log('STORAGE_KEY:', STORAGE_KEY)
   try {
     // 检查本地storage中是否存在用户ID
     // 正式环境
     const storedUserId = localStorage.getItem(STORAGE_KEY)
-
-    // 测试环境
-    //let storedUserId = localStorage.getItem(STORAGE_KEY)
-    // 测试用：设置默认值
-    //storedUserId = '123'
-
+    console.log('**本地存储的用户ID:', storedUserId)
     if (storedUserId) {
+      console.log('if-本地存储的用户ID:', storedUserId)
       return storedUserId
     }
     // 如果本地没有用户ID，从后端获取新的用户ID
     const response = await axios.get<CreateUserResponse>(`${API_BASE_URL}/create_user`)
-    const { userid } = response.data
-
+    const { user_id } = response.data
+    console.log('else-后端获取的用户ID:', user_id)
     // 将新的用户ID保存到本地storage
-    localStorage.setItem(STORAGE_KEY, userid)
-    return userid
+    localStorage.setItem(STORAGE_KEY, user_id)
+    console.log('**将新的用户ID保存到本地storage:', user_id)
+    return user_id
   } catch (error) {
     console.error('获取用户ID失败:', error)
     throw error
@@ -98,27 +97,14 @@ export const createNewSession = async (userid: string): Promise<CreateSessionRes
   const STORAGE_KEY = 'ztf_session_id'
   try {
     //正式环境
-    const response = await axios.get<CreateSessionResponse>(`${API_BASE_URL}/chat/create_new_chat`, {
+    const response = await axios.get<CreateSessionResponse>(`${API_BASE_URL}/create_new_chat`, {
       params: {
         userid
       }
     })
-    // 将会话ID保存到本地storage
-    localStorage.setItem(STORAGE_KEY, response.data.sessionid)
+    // 2. 将会话ID保存到本地storage
+    localStorage.setItem(STORAGE_KEY, response.data.session_id)
     return response.data
-
-    /*测试环境
-    const testSessionId = `session_${Date.now()}`
-    const testResponse: CreateSessionResponse = {
-      userid: userid,
-      sessionid: testSessionId
-    }
-
-    // 将会话ID保存到本地storage
-    localStorage.setItem(STORAGE_KEY, testResponse.sessionid)
-    return testResponse
-*/
-
   } catch (error) {
     console.error('创建会话失败:', error)
     throw error
@@ -163,18 +149,14 @@ export const sendMessage = async (
         story_type
       }
     })
+    console.log('发送消息参数:', {
+      userid,
+      sessionid,
+      user_msg,
+      story_type
+    })
+    console.log('发送消息返回值:', response.data)
     return response.data
-
-
-    /* 测试环境
-    // 模拟后端响应
-    const testResponse: SendMessageResponse = {
-      sessionid: sessionid,
-      system_msg: `测试回复: 收到消息"${user_msg}"，会话ID为${sessionid}${story_type ? '，话题为' + story_type : ''}`
-    }
-    return testResponse
-    */
-
   } catch (error) {
     console.error('发送消息失败:', error)
     throw error
@@ -203,24 +185,6 @@ export const loadSpecificSession = async (
       }
     })
     return response.data
-
-/*
-    // 测试环境
-    // 模拟后端响应
-    const testResponse: LoadSessionResponse = {
-      msg: [{
-        userid: userid,
-        sessionid: sessionid,
-        history: JSON.stringify([
-          { role: 'user', content: '测试消息1' },
-          { role: 'assistant', content: '测试回复1' },
-          { role: 'user', content: '测试消息2' },
-          { role: 'assistant', content: '测试回复2' }
-        ])
-      }]
-    }
-    return testResponse
-*/
   } catch (error) {
     console.error('加载会话历史记录失败:', error)
     throw error
@@ -238,30 +202,10 @@ export const loadSpecificSession = async (
 export const loadHistory = async (userid: string): Promise<LoadHistoryResponse> => {
   try {
     // 正式环境
-    const response = await axios.get<LoadHistoryResponse>(`${API_BASE_URL}/chat/load_history`, {
+    const response = await axios.get<LoadHistoryResponse>(`${API_BASE_URL}/load_history`, {
       params: { userid }
     })
     return response.data
-
-
-    /* 测试环境
-    // 模拟后端响应
-    const testResponse = {
-      msg: [
-        {
-          sessionid: 'test_session_1',
-          abstract: '测试会话1',
-          update_time: new Date().toISOString()
-        },
-        {
-          sessionid: 'test_session_2',
-          abstract: '测试会话2',
-          update_time: new Date(Date.now() - 86400000).toISOString() // 一天前
-        }
-      ]
-    }
-    return testResponse*/
-
   } catch (error) {
     console.error('加载历史记录失败:', error)
     throw error
@@ -280,19 +224,13 @@ export const loadHistory = async (userid: string): Promise<LoadHistoryResponse> 
 export const deleteSession = async (userid: string, sessionid: string): Promise<DeleteSessionResponse> => {
   try {
     // 正式环境
-    const response = await axios.delete<DeleteSessionResponse>(`${API_BASE_URL}/chat/delete_session`, {
+    const response = await axios.get<DeleteSessionResponse>(`${API_BASE_URL}/chat/delete_session`, {
       params: {
         userid,
         sessionid
       }
     })
     return response.data
-
-
-    // 测试环境
-    // 模拟后端响应
-    //return { msg: 'success' }
-
   } catch (error) {
     console.error('删除会话失败:', error)
     throw error
@@ -310,19 +248,12 @@ export const deleteSession = async (userid: string, sessionid: string): Promise<
 export const saveUserMsg = async (userid: string): Promise<SaveUserMsgResponse> => {
   try {
     // 正式环境
-    const response = await axios.get<SaveUserMsgResponse>(`${API_BASE_URL}/chat/save_user_msg`, {
+    const response = await axios.get<SaveUserMsgResponse>(`${API_BASE_URL}/chat/save_usermsg`, {
       params: {
         userid
       }
     })
     return response.data
-
-
-    // 测试环境
-    //const testResponse: SaveUserMsgResponse = {
-    //  msg: '保存成功'
-    //}
-    //return testResponse
   } catch (error) {
     console.error('保存用户消息失败:', error)
     throw error

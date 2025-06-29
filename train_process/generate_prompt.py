@@ -158,8 +158,8 @@ def save_to_jsonl(data: list[dict], filepath: str):
 
 def main():
     # 直接在代码中定义路径和参数
-    INPUT_FILE = "data.txt"
-    OUTPUT_FILE = "output.jsonl"
+    INPUT_FILE = "train_process/data.txt"
+    OUTPUT_FILE = "train_process/output.jsonl"
     AUTHOR_NAME = "这位作家"
     CONTEXT_SIZE = 1
     RESPONSE_SIZE = 1

@@ -347,7 +347,7 @@ def generate_text(
 
 # 运行训练
 if __name__ == "__main__":
-    jsonl_data_path = "output.jsonl"  # 修改为正确的文件路径
+    jsonl_data_path = "train_process/output.jsonl"  # 修改为正确的文件路径
 
     model, tokenizer = train_model(
         jsonl_path=jsonl_data_path,

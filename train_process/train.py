@@ -20,7 +20,7 @@ from peft import LoraConfig, get_peft_model, TaskType, PeftModel
 from peft.utils import prepare_model_for_kbit_training
 
 # Hugging Face认证 - 如果网络有问题可以注释掉
-# login(token="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")
+# login(token="")
 
 # GPU内存优化设置
 if torch.cuda.is_available():

@@ -25,13 +25,11 @@ import time
 import asyncio
 import aiohttp
 
-# Hugging Face认证 - 如果网络有问题可以注释掉
-# login(token="")
 
 # DeepSeek API配置
 class DeepSeekConfig:
     def __init__(self, api_key: str, base_url: str = "https://api.deepseek.com"):
-        self.api_key = " "
+        self.api_key = api_key
         self.base_url = base_url
         self.model_name = "deepseek-chat"
         self.headers = {
@@ -306,36 +304,47 @@ class DistillationTrainer(Trainer):
         self.temperature = temperature
         self.alpha = alpha
     
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """
         计算知识蒸馏损失
         """
+        # 确保输入张量在正确的设备上并且需要梯度
+        device = next(model.parameters()).device
+        
+        # 处理输入数据
+        for key in inputs:
+            if isinstance(inputs[key], torch.Tensor):
+                inputs[key] = inputs[key].to(device)
+        
         # 获取学生模型的输出
         outputs = model(**inputs)
-        student_logits = outputs.logits
         
-        # 计算标准的语言模型损失
-        if "labels" in inputs:
-            labels = inputs["labels"]
-            # 移动labels到正确的设备
-            labels = labels.to(student_logits.device)
-            
-            # 计算交叉熵损失
-            shift_logits = student_logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            
-            loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
-            lm_loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        # 如果模型输出包含loss，直接使用
+        if hasattr(outputs, 'loss') and outputs.loss is not None:
+            total_loss = outputs.loss
         else:
-            lm_loss = outputs.loss if hasattr(outputs, 'loss') else torch.tensor(0.0, device=student_logits.device)
+            # 手动计算损失
+            student_logits = outputs.logits
+            
+            if "labels" in inputs:
+                labels = inputs["labels"]
+                
+                # 确保labels在正确的设备上
+                labels = labels.to(device)
+                
+                # 计算交叉熵损失
+                shift_logits = student_logits[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+                
+                loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
+                total_loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            else:
+                # 如果没有labels，创建一个需要梯度的零损失
+                total_loss = torch.tensor(0.0, device=device, requires_grad=True)
         
-        # 如果有教师输出，计算蒸馏损失
-        if self.teacher_outputs and len(self.teacher_outputs) > 0:
-            # 这里简化处理，实际应用中可以更复杂
-            # 由于我们使用的是文本形式的教师输出，这里主要使用标准损失
-            total_loss = lm_loss
-        else:
-            total_loss = lm_loss
+        # 确保损失张量需要梯度
+        if not total_loss.requires_grad:
+            total_loss = total_loss.clone().detach().requires_grad_(True)
         
         return (total_loss, outputs) if return_outputs else total_loss
 
@@ -388,32 +397,52 @@ def train_model_from_raw_data(
     """
     print("=== 开始完整的数据处理和训练流程 ===")
     
-    # 第一步：数据处理 - 将原始文本转换为训练数据
-    print("\n第一步：数据处理")
-    data_processor = DataProcessor(deepseek_config)
-    
-    # 处理原始数据生成JSONL训练文件
-    training_data = data_processor.process_raw_data_to_jsonl(
-        input_file=raw_data_path,
-        output_file=jsonl_output_path,
-        chunk_size=chunk_size,
-        enable_qa=enable_qa,
-        enable_article=enable_article
-    )
-    
-    print(f"\n数据处理完成，生成了 {len(training_data)} 条训练样本")
-    
-    # 第二步：加载处理后的训练数据
-    print("\n第二步：加载训练数据")
-    datasets = load_and_split_data(jsonl_output_path)
-    
-    # 准备教师输出（用于知识蒸馏）
-    teacher_outputs = [item['output'] for item in training_data]
+    # 检查JSONL文件是否已存在
+    if os.path.exists(jsonl_output_path):
+        print(f"\n发现已存在的训练数据文件: {jsonl_output_path}")
+        print("跳过教师模型生成步骤，直接加载现有数据进行训练")
+        
+        # 直接加载现有的训练数据
+        datasets = load_and_split_data(jsonl_output_path)
+        
+        # 从文件中读取训练数据用于准备教师输出
+        training_data = []
+        with open(jsonl_output_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                try:
+                    training_data.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        
+        print(f"加载了 {len(training_data)} 条现有训练样本")
+        teacher_outputs = [item['output'] for item in training_data]
+    else:
+        # 第一步：数据处理 - 将原始文本转换为训练数据
+        print("\n第一步：数据处理")
+        data_processor = DataProcessor(deepseek_config)
+        
+        # 处理原始数据生成JSONL训练文件
+        training_data = data_processor.process_raw_data_to_jsonl(
+            input_file=raw_data_path,
+            output_file=jsonl_output_path,
+            chunk_size=chunk_size,
+            enable_qa=enable_qa,
+            enable_article=enable_article
+        )
+        
+        print(f"\n数据处理完成，生成了 {len(training_data)} 条训练样本")
+        
+        # 第二步：加载处理后的训练数据
+        print("\n第二步：加载训练数据")
+        datasets = load_and_split_data(jsonl_output_path)
+        
+        # 准备教师输出（用于知识蒸馏）
+        teacher_outputs = [item['output'] for item in training_data]
 
     # 第三步：模型训练
     print("\n第三步：开始模型训练")
     print(f"训练数据集大小: {len(datasets['train'])}")
-    print(f"验证数据集大小: {len(datasets['validation'])}")
+    print(f"验证数据集大小: {len(datasets['val'])}")
     
     # 加载Qwen-7B-Chat模型和分词器
     print(f"加载Qwen模型: {model_name}")
@@ -486,16 +515,33 @@ def train_model_from_raw_data(
     # 打印可训练参数数量
     model.print_trainable_parameters()
     
-    # 验证LoRA参数确实需要梯度
+    # 验证并修复LoRA参数的梯度设置
     trainable_params = []
     for name, param in model.named_parameters():
         if param.requires_grad:
             trainable_params.append(name)
+        # 确保LoRA相关参数需要梯度
+        elif 'lora' in name.lower():
+            param.requires_grad_(True)
+            trainable_params.append(name)
+            print(f"修复参数梯度设置: {name}")
+    
     print(f"需要梯度的参数数量: {len(trainable_params)}")
     if len(trainable_params) > 0:
         print(f"前5个可训练参数: {trainable_params[:5]}")
     else:
-        print("警告：没有找到需要梯度的参数！")
+        print("错误：没有找到需要梯度的参数！")
+        raise RuntimeError("模型没有可训练的参数，无法进行训练")
+    
+    # 额外验证：确保模型处于训练模式
+    model.train()
+    
+    # 验证模型参数状态
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"总参数数量: {total_params:,}")
+    print(f"可训练参数数量: {trainable_params_count:,}")
+    print(f"可训练参数比例: {trainable_params_count/total_params*100:.2f}%")
     
     print(f"LoRA模型配置完成，大幅减少了可训练参数数量")
 
@@ -516,20 +562,34 @@ def train_model_from_raw_data(
             prompt = f"<|im_start|>user\n{example['instruction']}<|im_end|><|im_start|>assistant\n{example['output']}<|im_end|>"
             
             # 分词和截断
-            tokenized = tokenizer(prompt, truncation=True, max_length=max_length)
+            tokenized = tokenizer(prompt, truncation=True, max_length=max_length, return_tensors=None)
             
             input_ids = tokenized['input_ids']
+            
+            # 确保input_ids是列表格式
+            if isinstance(input_ids, torch.Tensor):
+                input_ids = input_ids.tolist()
             
             # 手动创建labels和attention_mask
             labels = input_ids.copy()
             attention_mask = [1] * len(input_ids)
 
-            # 手动填充
+            # 手动填充到固定长度
             padding_length = max_length - len(input_ids)
+            if padding_length > 0:
+                input_ids = input_ids + ([pad_token_id] * padding_length)
+                attention_mask = attention_mask + ([0] * padding_length)
+                labels = labels + ([-100] * padding_length)
+            elif padding_length < 0:
+                # 如果超长，截断
+                input_ids = input_ids[:max_length]
+                attention_mask = attention_mask[:max_length]
+                labels = labels[:max_length]
 
-            input_ids = input_ids + ([pad_token_id] * padding_length)
-            attention_mask = attention_mask + ([0] * padding_length)
-            labels = labels + ([-100] * padding_length)
+            # 确保所有列表长度一致
+            assert len(input_ids) == max_length
+            assert len(labels) == max_length
+            assert len(attention_mask) == max_length
 
             input_ids_list.append(input_ids)
             labels_list.append(labels)
@@ -551,20 +611,34 @@ def train_model_from_raw_data(
     if steps_per_epoch == 0:
         steps_per_epoch = 1
 
+    # RTX 5070Ti 优化的训练参数
+    # 根据GPU内存自动调整batch size和gradient accumulation
+    gpu_memory_gb = 16  # RTX 5070Ti 显存
+    if gpu_memory_gb >= 16:
+        per_device_batch_size = 4
+        gradient_accumulation_steps = 4
+    elif gpu_memory_gb >= 12:
+        per_device_batch_size = 2
+        gradient_accumulation_steps = 8
+    else:
+        per_device_batch_size = 1
+        gradient_accumulation_steps = 16
+    
     training_args = TrainingArguments(
         output_dir=output_dir,
         num_train_epochs=num_epochs,
-        per_device_train_batch_size=1,
-        per_device_eval_batch_size=1,
+        per_device_train_batch_size=per_device_batch_size,
+        per_device_eval_batch_size=per_device_batch_size,
         learning_rate=2e-4,
         weight_decay=0.01,
-        gradient_accumulation_steps=8,
+        gradient_accumulation_steps=gradient_accumulation_steps,
         fp16=False,
-        bf16=True,
-        gradient_checkpointing=False,
-        dataloader_pin_memory=False,
+        bf16=True,  # RTX 5070Ti 支持 BF16
+        gradient_checkpointing=True,  # 节省显存
+        gradient_checkpointing_kwargs={"use_reentrant": False},  # 使用新的梯度检查点格式
+        dataloader_pin_memory=True,  # 加速数据传输
         remove_unused_columns=False,
-        dataloader_num_workers=0,
+        dataloader_num_workers=0,  # 禁用多进程数据加载，避免序列化问题
         max_grad_norm=1.0,
         logging_steps=10,
         eval_strategy="steps",
@@ -576,15 +650,32 @@ def train_model_from_raw_data(
         report_to="none",
         warmup_steps=100,
         save_safetensors=True,
+        # RTX 5070Ti 额外优化参数
+        optim="adamw_torch_fused",  # 融合优化器，提升性能
+        tf32=True,  # 启用 TF32 加速
+        ddp_find_unused_parameters=False,  # 分布式训练优化
     )
 
     # 初始化知识蒸馏Trainer
     print("初始化知识蒸馏Trainer...")
     
+    # 使用默认的数据整理器
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
         mlm=False,
+        pad_to_multiple_of=None,
+        return_tensors="pt"
     )
+    
+    # 验证数据集格式
+    print(f"训练数据集样本数: {len(train_dataset)}")
+    print(f"验证数据集样本数: {len(val_dataset)}")
+    if len(train_dataset) > 0:
+        sample = train_dataset[0]
+        print(f"数据样本键: {list(sample.keys())}")
+        print(f"input_ids长度: {len(sample['input_ids'])}")
+        print(f"labels长度: {len(sample['labels'])}")
+        print(f"attention_mask长度: {len(sample['attention_mask'])}")
     
     trainer = DistillationTrainer(
         model=model,
@@ -673,21 +764,23 @@ def generate_text(
 if __name__ == "__main__":
     # 配置DeepSeek API
     deepseek_config = DeepSeekConfig(
-        api_key="your_deepseek_api_key_here",  # 请替换为实际的API密钥
-        base_url="https://api.deepseek.com/v1/chat/completions",
-        model="deepseek-chat"
+        api_key="",  # 请替换为实际的API密钥
+        base_url="https://api.deepseek.com"
     )
     
-    # 原始数据文件路径
-    raw_data_path = "data.txt"  # 原始文本数据
-    jsonl_output_path = "deepseek_generated_training_data.jsonl"  # 生成的训练数据
+    # 获取当前脚本所在目录的绝对路径
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # 原始数据文件路径（使用绝对路径）
+    raw_data_path = os.path.join(script_dir, "data.txt")  # 原始文本数据
+    jsonl_output_path = os.path.join(script_dir, "deepseek_generated_training_data.jsonl")  # 生成的训练数据
 
     # 完整的数据处理和训练流程
     model, tokenizer = train_model_from_raw_data(
         raw_data_path=raw_data_path,
         deepseek_config=deepseek_config,
         model_name="Qwen/Qwen-7B-Chat",
-        output_dir="./qwen_7b_trained_with_deepseek_lora",
+        output_dir=os.path.join(script_dir, "qwen_7b_trained_with_deepseek_lora"),
         batch_size=1,
         learning_rate=2e-4,
         num_epochs=15,

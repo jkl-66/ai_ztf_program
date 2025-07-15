@@ -8,7 +8,7 @@ from peft import PeftModel
 from huggingface_hub import login
 
 # Hugging Face认证（与train.py保持一致）
-login(token=" ")
+login(token="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")
 
 # 1. 加载LoRA训练后的模型和分词器
 def load_trained_model(model_path: str, base_model_name: str = "Qwen/Qwen-7B-Chat"):

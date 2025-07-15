@@ -5,7 +5,7 @@
       <!--左侧会话列表-->
       <Sidebar
         :chat-records="chatRecords"
-        @new-chat="handleNewChat()"
+        @new-chat="handleNewChat"
         @select-chat="handleSelectChat"
         @delete-chat="handleDeleteChat"
       />
@@ -21,14 +21,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted ,onUnmounted} from 'vue'
+import { onBeforeRouteLeave } from 'vue-router'
 import WebHeader from '../components/WebHeader.vue'
 import Sidebar from '../components/Sidebar.vue'
 import ChatHeader from '../components/ChatHeader.vue'
 import ChatContainer from '../components/ChatContainer.vue'
 import ChatInput from '../components/ChatInput.vue'
-import { getUserId, createNewSession, sendMessage, loadSpecificSession, loadHistory, deleteSession, saveUserMsg } from '../api/ftbAPI'
-
+//修改
+//import { getUserId, createNewSession, sendMessage, loadSpecificSession, loadHistory, deleteSession, saveUserMsg, saveUserMsgOnUnload } from '../api/ftbAPI'
+import { getUserId, createNewSession, sendMessage, loadSpecificSession, loadHistory, deleteSession, saveUserMsg, saveUserMsgOnUnload } from '../api/ftbAPI'
 //消息结构
 interface Message {
   id: number        // 消息ID
@@ -53,6 +55,70 @@ const chatRecords = ref<ChatRecord[]>([])
 const userId = ref('')
 const currentSessionId = ref('')
 
+// 清理事件监听器
+// onUnmounted(() => {
+//   window.removeEventListener('beforeunload', handlePageUnload)
+//   window.removeEventListener('pagehide', handlePageUnload)
+//   document.removeEventListener('visibilitychange', handleVisibilityChange)
+// })
+
+//修改
+// 添加防重复调用的标志
+// let isSaving = false
+
+
+// // 普通的保存函数（用于路由切换等场景）
+// const handleSaveUserMsg = async () => {
+//   if (isSaving || !userId.value || messages.value.length === 0) return
+  
+//   isSaving = true
+//   try {
+//     await saveUserMsg(userId.value)
+//     localStorage.setItem('ztf_session_id', currentSessionId.value)
+//     console.log('保存成功')
+//   } catch (error) {
+//     console.error('保存失败:', error)
+//   } finally {
+//     isSaving = false
+//   }
+// }
+
+// // 页面卸载时的保存函数（使用sendBeacon）
+// const handlePageUnload = () => {
+//   if (!userId.value || isSaving || messages.value.length === 0) return
+  
+//   // 使用 sendBeacon 确保请求不被中止
+//   const success = saveUserMsgOnUnload(userId.value)
+//   console.log('页面卸载保存:', success ? '成功' : '失败')
+  
+//   // 保存会话ID到localStorage
+//   if (currentSessionId.value) {
+//     localStorage.setItem('ztf_session_id', currentSessionId.value)
+//   }
+// }
+
+// // 页面可见性变化时的保存（更可靠的保存时机）
+// const handleVisibilityChange = () => {
+//   // 当页面变为隐藏状态时保存
+//   if (document.hidden && userId.value && !isSaving && messages.value.length > 0) {
+//     handleSaveUserMsg()
+//   }
+// }
+
+// 路由离开前保存
+onBeforeRouteLeave((to, from) => {
+  if (userId.value && messages.value.length > 0) {
+    try {
+      //修改
+      saveUserMsg(userId.value)
+      // handleSaveUserMsg()
+      localStorage.setItem('ztf_session_id', currentSessionId.value)
+      console.log('跳转前保存成功')
+    } catch (error) {
+      console.error('跳转保存失败:', error)
+    }
+  }
+})
 
 // 初始化：获取用户ID和会话ID
 onMounted(async () => {
@@ -89,6 +155,13 @@ onMounted(async () => {
     await handleNewChat()
     console.log('1-初始化失败，创建新会话')
   }
+  //修改
+  //  // 监听页面卸载事件（使用sendBeacon）
+  //  window.addEventListener('beforeunload', handlePageUnload)
+  // window.addEventListener('pagehide', handlePageUnload) // 移动端兼容
+  
+  // 监听页面可见性变化（更可靠的保存时机）
+  // document.addEventListener('visibilitychange', handleVisibilityChange)
 
   // 添加页面关闭时的自动保存功能
   window.addEventListener('beforeunload', async () => {
@@ -97,12 +170,29 @@ onMounted(async () => {
         await saveUserMsg(userId.value)
         // 保存当前会话ID
         localStorage.setItem('ztf_session_id', currentSessionId.value)
+        console.log('自动保存成功')
       }
+    // 暂停100秒
+    // await new Promise(resolve => setTimeout(resolve, 100000))
     } catch (error) {
       console.error('自动保存失败:', error)
     }
   })
-})
+  // //添加浏览器后退时自动保存
+  // window.addEventListener('popstate', async () => {
+  //   try {
+  //     if (userId.value) {
+  //       await saveUserMsg(userId.value)
+  //       // 保存当前会话ID
+  //       localStorage.setItem('ztf_session_id', currentSessionId.value)
+  //       console.log('自动保存成功')
+  //     }
+  //   } catch (error) {
+  //     console.error('自动保存失败:', error)
+  //   }
+  // })
+}
+)
 
 // 加载历史记录
 const loadHistoryRecords = async () => {
@@ -110,15 +200,36 @@ const loadHistoryRecords = async () => {
     // 加载历史记录
     const historyResponse = await loadHistory(userId.value)
     console.log('加载历史记录', historyResponse)
-
-    // 检查历史记录是否为空
     if (!historyResponse || !historyResponse.msg || historyResponse.msg.length === 0) {
+      chatRecords.value = []
       return null
     }
+
+    // 过滤有内容的会话，删除空会话
+    const validSessions = []
+    for (const session of historyResponse.msg) {
+      if (String(session.session_id) === '10001' || Number(session.session_id) === 10001) {
+        continue // 跳过默认会话
+      }
+      try {
+        const response = await loadSpecificSession(userId.value, session.session_id)
+        const history = JSON.parse(response.msg[0].history)
+        if (history && history.length > 0) {
+          validSessions.push(session) // 有内容的会话保留
+        } else {
+          // 删除空会话
+          await deleteSession(userId.value, session.session_id)
+          console.log('删除空会话:', session.session_id)
+        }
+      } catch (error) {
+        console.error('检查会话内容失败:', session.session_id, error)
+      }
+    }
     // 按更新时间降序排序
-    const sortedHistory = historyResponse.msg.sort((a, b) =>
+    const sortedHistory = validSessions.sort((a, b) =>
       new Date(b.update_time).getTime() - new Date(a.update_time).getTime()
     )
+
     // 转换为ChatRecord格式并更新列表
     chatRecords.value = sortedHistory.map(session => ({
       id: session.session_id,
@@ -127,9 +238,13 @@ const loadHistoryRecords = async () => {
       userid: userId.value,
       topic: localStorage.getItem(`topic_${session.session_id}`) || ''
     }))
+
+    console.log('有效的历史记录:', sortedHistory)
     return sortedHistory
   } catch (error) {
     console.error('加载历史记录失败:', error)
+    chatRecords.value = []
+
     return null
   }
 }

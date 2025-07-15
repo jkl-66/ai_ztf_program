@@ -5,12 +5,16 @@ from fastapi_project.util.chat_util import (
     find_paragraphs_with_keyword,
     get_paras_from_kws
 )
+import asyncio
+from fastapi_project.util.db_util import get_docs_from_summaryindex
 from fastapi_project.settings import settings
 from fastapi_project.util import db_util
 from fastapi_project.util.speech_recognition import recognize_audio_file
 from fastapi_project.util.text_to_speech import synthesize_text
+from fastapi_project.util.spider_util import get_baidu_hot_news,get_topics,save_to_db
 import uuid
 import json
+from llama_index.core import StorageContext, get_response_synthesizer, load_index_from_storage
 # 初始化llm和embed模型 - 只调用一次
 llm, embed_model = initialize_llamaindex(deepseekapi=settings.DEEPSEEK_API)
 # 加载索引时使用已初始化的模型
@@ -22,6 +26,9 @@ summary_index,simple_index = db_util.load_indexes()
 #     {"role": "user", "content": "他在监狱里面经历了什么？"},
 
 # ]
+#加载新闻索引
+storage_context = StorageContext.from_defaults(persist_dir="fastapi_project\\store\\news_summaryindex")
+loaded_news_sum_index = load_index_from_storage(storage_context)
   
 
 from fastapi import FastAPI, Query, File, UploadFile, Form
@@ -57,12 +64,138 @@ msg_pool = {
     }
     
 }
+
+#get_docs_from_summaryindex(loaded_news_sum_index)
+
+@app.get("/generate_topic_and_comments")
+async def generate_topic_and_comments():
+    """
+    进行爬虫、入库、选择最新热点，调取index、产生时评
+    """
+    #1.爬虫和入库
+    news_text = get_baidu_hot_news()
+    # 过滤掉空列表的情况
+    filtered_news_text = {key: value for key, value in news_text.items() if value}
+    res = get_topics(filtered_news_text)
+    save_to_db(res,filtered_news_text)
+    #2.从数据库取出最新热点数据
+    query = """
+    select * from(
+select distinct on(content_length)* from(
+SELECT * FROM baidu_news 
+WHERE DATE_TRUNC('minute', created_at) = (
+    SELECT MAX(DATE_TRUNC('minute', created_at)) FROM baidu_news
+) and content_length > 100) as result) as b
+order by  hottopic;
+    """
+    res = db_util.execute_query(query)
+    import pandas as pd
+    df = pd.DataFrame(res)
+    groups = df.groupby(by=[1])
+    titles=[]
+    abstracts=[]
+    keywords_list=[]
+    contexts=[]
+    for name,group in groups:
+        titles.append(group.iloc[0][1])
+        abstracts.append(group.iloc[0][9])
+        keywords_list.append(group.iloc[0][10])
+        context = ''
+        for cont in group.iloc[:,3]:
+            context +='报道：\n\n'+ cont + '\n'+'------------------------------------\n'
+        contexts.append(context)
+    df_news=pd.DataFrame({'title':titles,'abstract':abstracts,'keywords':keywords_list,'context':contexts})
+    print(df_news['keywords'][0])
+    llm, embed_model = initialize_llamaindex(deepseekapi=settings.DEEPSEEK_API)
+    #加载新闻索引
+    storage_context = StorageContext.from_defaults(persist_dir="fastapi_project\\store\\news_summaryindex")
+    loaded_news_sum_index = load_index_from_storage(storage_context)
+    # 检索
+    ref_source = []
+    for keywords in df_news['keywords']:
+        query = f"""
+        用户希望查询的主题是：{keywords},
+        哪些文档的主题和用户查询的主题相符合？
+        """
+        ref_docs = get_docs_from_summaryindex(loaded_news_sum_index,query=query,k=3)
+        # 选择text最长的ref_doc
+        ref_doc = max(ref_docs, key=lambda x: len(x['text'])) if ref_docs else None
+        ref_source.append(ref_doc['text'])
+    df_news['ref_resource'] = ref_source
+    #开始获取评论
+    print(len(df_news))
+    from openai import OpenAI
+    client = OpenAI(api_key=settings.DEEPSEEK_API, base_url="https://api.deepseek.com")
+    system_msg_list = []
+    one_comment_list = []
+    for i in range(len(df_news)):
+        se = df_news.iloc[i]
+        context = se['context']
+        ref_resource= se['ref_resource']
+        GET_COMMENTS_PROMPT=f"""
+        任务：你将扮演邹韬奋对时事新闻进行评论。你需要参考时事新闻的相关报道，并模仿目标文本纂写评论。
+        评论的长度和目标文本类似。
+        注意：
+        1.你需要解析目标文本所使用的叙述结构、修辞手法和语言风格，以及重要的态度，并在评论中体现这些特点。
+        2.你需要围绕时事新闻进行评论，而不能超出给定的时事新闻的范围。
+        3.最大限度利用时事新闻的信息。
+        4.你需要尽可能改写目标文本中的描述，以适应对时事新闻的评论。
+        ==============================
+        你参考的时事新闻是：
+        {context}
+        ===============================
+        你需要仿照的目标文本是：
+        {ref_resource}
+        ===============================
+        你的评论：
+        """
+        response = client.chat.completions.create(
+        model="deepseek-chat",
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant"},
+            {"role": "user", "content": GET_COMMENTS_PROMPT},
+        ],
+        stream=False
+        )
+        system_msg = response.choices[0].message.content
+        system_msg_list.append(system_msg)
+        GET_ONE_COMMENT_PROMPT = f"""
+        你将扮演邹韬奋，依据下列评论文本，总结评论内容，形成一句掷地有声的概括性评论。
+        概括性评论需要吸人眼球，具有口语特征，不要使用书面语的特殊用法。不超过20个字，仅返回概括性评论内容，不需要附加其余的解释，不要含有双引号，不要含有冒号。
+        评论文本是：
+        {system_msg}
+        你的评论：
+        """
+        response = client.chat.completions.create(
+        model="deepseek-chat",
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant"},
+            {"role": "user", "content": GET_ONE_COMMENT_PROMPT},
+        ],
+        stream=False
+        )
+        one_comment = response.choices[0].message.content
+        one_comment_list.append(one_comment)
+    df_news['comments'] = system_msg_list
+    df_news['one_comment'] = one_comment_list
+    return_msg = df_news.loc[:,['title','one_comment','abstract','comments','keywords','ref_resource']]
+    return {'msg':return_msg}
+
+
+
+
+
+
+
+
+
 @app.get("/chat")
 def chat(
     userid: str = Query(..., description="用户ID"),
     sessionid: str = Query(..., description="会话ID"), 
     user_msg: str = Query(..., description="用户消息"),
-    story_type: str = Query(..., description="故事类型")
+    story_type: str = Query(..., description="故事类型"),
+    func_control: dict = Form(default={'Vector': True, 'knowledge': True, 'EsSearch': True, 'Model_enhance': True})
 ):
     #获取msg_pool中user_id和seession_id对应的msg列表
     msg_list = msg_pool[userid][sessionid]
@@ -318,7 +451,7 @@ def save_usermsg(
         db_util.execute_query(update_query)
     return {"msg": "保存成功"}
 
-def process_chat_internal(userid: str, sessionid: str, user_msg: str, story_type: str) -> str:
+def process_chat_internal(userid: str, sessionid: str, user_msg: str, story_type: str, func_control: dict) -> str:
     """
     内部聊天处理函数，返回AI回复
     """
@@ -390,7 +523,8 @@ async def upload_audio(
     audio: UploadFile = File(...),
     user_id: str = Form(...),
     session_id: str = Form(...),
-    story_type: str = Form(default="x")
+    story_type: str = Form(default="x"),
+    func_control: dict = Form(default={'Vector': True, 'knowledge': True, 'EsSearch': True, 'Model_enhance': True})
 ):
     """
     接收前端上传的音频文件，进行语音识别，并返回AI回复
@@ -480,7 +614,10 @@ async def upload_audio(
                     print(f"AI回复语音合成成功，时长: {ai_audio_duration}秒")
             except Exception as e:
                 print(f"AI回复语音合成失败: {e}")
-        msg_pool[user_id][session_id].append({"role": "assistant", "content": ai_response})
+        
+        # 确保ai_response不为None再添加到消息池
+        if ai_response is not None:
+            msg_pool[user_id][session_id].append({"role": "assistant", "content": ai_response})
         
         return {
             "msg": "语音处理成功",
